@@ -4,6 +4,7 @@ import os
 import zipfile
 from io import BytesIO
 import base64
+import gc
 
 # 初始化session state
 if 'split_result' not in st.session_state:
@@ -16,59 +17,149 @@ if 'uploaded_file_content' not in st.session_state:
     st.session_state.uploaded_file_content = None
 if 'uploaded_files_content' not in st.session_state:
     st.session_state.uploaded_files_content = None
+if 'data_chunks' not in st.session_state:
+    st.session_state.data_chunks = {}
+if 'total_rows' not in st.session_state:
+    st.session_state.total_rows = 0
+if 'file_size_warning' not in st.session_state:
+    st.session_state.file_size_warning = False
 
 def read_excel_columns(file_content):
     """读取Excel文件的列名而不加载数据"""
     df = pd.read_excel(file_content, nrows=0)
     return df.columns.tolist()
 
-def split_excel(file_content, num_splits, selected_columns=None):
-    """将Excel文件拆分为多个子文件"""
-    df = pd.read_excel(file_content)
+def split_excel_by_dict(file_content, num_splits, selected_columns=None, chunk_size=10000):
+    """将Excel文件按块读取到字典中，并按指定规则拆分"""
+    # 先获取总行列数判断文件大小
+    df_info = pd.ExcelFile(file_content).parse(nrows=0)
+    total_cols = df_info.shape[1]
     
-    if selected_columns:
-        df = df[selected_columns]
+    # 检查文件大小
+    file_size = len(file_content.getvalue()) / (1024 * 1024)  # MB
+    if file_size > 500:
+        st.session_state.file_size_warning = True
+        st.warning(f"检测到大型文件（{file_size:.2f}MB），正在分块处理以降低内存消耗...")
     
-    total_rows = len(df)
-    rows_per_split = total_rows // num_splits
-    remainder = total_rows % num_splits
+    # 清空现有数据块缓存
+    st.session_state.data_chunks = {}
+    st.session_state.total_rows = 0
     
-    split_dfs = []
-    start_idx = 0
+    # 分块读取数据到字典
+    excel_file = pd.ExcelFile(file_content)
+    chunk_idx = 0
+    
+    for chunk in excel_file.parse(chunksize=chunk_size):
+        if selected_columns:
+            chunk = chunk[selected_columns]
+        
+        st.session_state.data_chunks[chunk_idx] = chunk
+        st.session_state.total_rows += len(chunk)
+        chunk_idx += 1
+        
+        # 释放内存
+        del chunk
+        gc.collect()
+    
+    # 计算每个拆分文件的行数
+    rows_per_split = st.session_state.total_rows // num_splits
+    remainder = st.session_state.total_rows % num_splits
+    
+    # 准备拆分计划
+    split_plans = []
+    current_row = 0
     
     for i in range(num_splits):
-        current_rows = rows_per_split + (1 if i < remainder else 0)
-        end_idx = start_idx + current_rows
-        split_dfs.append(df.iloc[start_idx:end_idx])
-        start_idx = end_idx
+        target_rows = rows_per_split + (1 if i < remainder else 0)
+        split_plans.append({
+            'start_row': current_row,
+            'end_row': current_row + target_rows,
+            'chunks_needed': []  # 记录需要的块索引和范围
+        })
+        current_row += target_rows
     
-    return split_dfs
+    # 确定每个拆分需要哪些数据块
+    for plan in split_plans:
+        start_row = plan['start_row']
+        end_row = plan['end_row']
+        current_pos = 0
+        
+        for chunk_idx, chunk in st.session_state.data_chunks.items():
+            chunk_rows = len(chunk)
+            chunk_start = current_pos
+            chunk_end = current_pos + chunk_rows
+            
+            # 检查当前块是否与拆分范围有交集
+            if chunk_end > start_row and chunk_start < end_row:
+                # 计算交集范围
+                overlap_start = max(start_row, chunk_start) - chunk_start
+                overlap_end = min(end_row, chunk_end) - chunk_start
+                
+                plan['chunks_needed'].append({
+                    'chunk_idx': chunk_idx,
+                    'start': overlap_start,
+                    'end': overlap_end
+                })
+            
+            current_pos += chunk_rows
+    
+    return split_plans
 
-def merge_excel(files_content, selected_columns=None):
-    """合并多个Excel文件为一个"""
-    dfs = []
+def merge_excel(files_content, selected_columns=None, chunk_size=10000):
+    """分块合并多个Excel文件，降低内存占用"""
+    merged_chunks = []
     
-    for file in files_content:
-        df = pd.read_excel(file)
-        if selected_columns:
-            df = df[selected_columns]
-        dfs.append(df)
+    # 遍历每个文件
+    for file_idx, file in enumerate(files_content):
+        st.text(f"正在处理文件 {file_idx+1}/{len(files_content)}...")
+        excel_file = pd.ExcelFile(file)
+        
+        # 分块读取当前文件
+        for chunk in excel_file.parse(chunksize=chunk_size):
+            if selected_columns:
+                chunk = chunk[selected_columns]
+            merged_chunks.append(chunk)
+            
+            # 定期合并块以释放内存
+            if len(merged_chunks) >= 5:
+                merged_chunks = [pd.concat(merged_chunks, ignore_index=True)]
+        
+        # 释放内存
+        del excel_file, chunk
+        gc.collect()
     
-    merged_df = pd.concat(dfs, ignore_index=True)
-    return merged_df
+    # 合并所有块
+    if merged_chunks:
+        merged_df = pd.concat(merged_chunks, ignore_index=True)
+        return merged_df
+    return pd.DataFrame()
 
-def get_zip_download_link(split_dfs, original_filename):
-    """生成包含所有拆分文件的ZIP下载链接"""
+def get_zip_download_link(split_plans, original_filename):
+    """根据拆分计划生成ZIP下载链接"""
     zip_buffer = BytesIO()
     base_name, ext = os.path.splitext(original_filename)
     
     with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zipf:
-        for i, df in enumerate(split_dfs):
-            excel_buffer = BytesIO()
-            with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
-                df.to_excel(writer, index=False, sheet_name='Sheet1')
-            excel_buffer.seek(0)
-            zipf.writestr(f"{base_name}——拆分{i+1}of{len(split_dfs)}{ext}", excel_buffer.getvalue())
+        for i, plan in enumerate(split_plans):
+            # 创建新的DataFrame收集数据
+            split_df_parts = []
+            
+            for chunk_info in plan['chunks_needed']:
+                chunk = st.session_state.data_chunks[chunk_info['chunk_idx']]
+                split_df_parts.append(chunk.iloc[chunk_info['start']:chunk_info['end']])
+            
+            # 合并所有部分
+            if split_df_parts:
+                split_df = pd.concat(split_df_parts, ignore_index=True)
+                
+                # 写入Excel
+                excel_buffer = BytesIO()
+                with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
+                    split_df.to_excel(writer, index=False, sheet_name='Sheet1')
+                excel_buffer.seek(0)
+                
+                # 添加到ZIP
+                zipf.writestr(f"{base_name}——拆分{i+1}of{len(split_plans)}{ext}", excel_buffer.getvalue())
     
     zip_buffer.seek(0)
     b64 = base64.b64encode(zip_buffer.read()).decode()
@@ -88,7 +179,11 @@ def get_excel_download_link(df, original_filename):
     return href
 
 def main():
-    st.title("Excel文件拆分与合并工具")
+    st.title("Excel文件拆分与合并工具（字典缓存版）")
+    
+    # 显示内存优化提示
+    if st.session_state.file_size_warning:
+        st.info("当前文件较大，系统已启用分块处理模式，可能需要更长时间，请耐心等待...")
     
     # 选择操作类型
     operation = st.radio("选择操作类型", ["拆分文件", "合并文件"])
@@ -101,6 +196,7 @@ def main():
         if uploaded_file is not None:
             st.session_state.uploaded_file_content = uploaded_file
             st.session_state.original_filename = uploaded_file.name
+            st.session_state.file_size_warning = False  # 重置警告状态
         
         # 检查是否有上传的文件内容
         if st.session_state.uploaded_file_content is not None:
@@ -121,22 +217,33 @@ def main():
                 if not selected_columns:
                     st.error("请至少选择一列")
                 else:
-                    # 完整读取数据并执行拆分
-                    with st.spinner("正在读取数据并拆分文件..."):
-                        st.session_state.split_result = split_excel(
-                            st.session_state.uploaded_file_content, 
-                            num_splits, 
-                            selected_columns
-                        )
+                    # 重置结果以避免旧数据干扰
+                    st.session_state.split_result = None
+                    
+                    # 按块读取数据到字典并生成拆分计划
+                    with st.spinner("正在分块读取数据并生成拆分计划..."):
+                        try:
+                            split_plans = split_excel_by_dict(
+                                st.session_state.uploaded_file_content, 
+                                num_splits, 
+                                selected_columns
+                            )
+                            st.session_state.split_result = split_plans
+                            
+                            # 显示基本信息
+                            st.success(f"已成功规划拆分方案: {num_splits} 个文件，共 {st.session_state.total_rows} 行数据")
+                        except Exception as e:
+                            st.error(f"处理过程中出错: {str(e)}")
+                            st.error("请尝试减少拆分数量或选择更少的列，或使用更小的文件。")
             
             # 显示结果（如果有）
             if st.session_state.split_result is not None:
-                st.success(f"已成功将文件拆分为 {num_splits} 个部分")
+                st.success(f"已成功规划拆分方案: {len(st.session_state.split_result)} 个文件")
                 
-                # 显示前几个拆分文件的预览
-                for i, split_df in enumerate(st.session_state.split_result[:3]):
-                    st.subheader(f"拆分文件 {i+1}/{len(st.session_state.split_result)} 预览")
-                    st.dataframe(split_df.head(10))
+                # 显示拆分概要
+                st.subheader("拆分概要")
+                for i, plan in enumerate(st.session_state.split_result):
+                    st.text(f"文件 {i+1}: 行 {plan['start_row']+1}-{plan['end_row']}")
                 
                 # 生成ZIP下载链接
                 st.markdown(get_zip_download_link(
@@ -152,6 +259,7 @@ def main():
         if uploaded_files is not None and len(uploaded_files) > 0:
             st.session_state.uploaded_files_content = uploaded_files
             st.session_state.original_filename = uploaded_files[0].name if uploaded_files else "合并文件"
+            st.session_state.file_size_warning = False  # 重置警告状态
         
         # 检查是否有上传的文件内容
         if st.session_state.uploaded_files_content is not None and len(st.session_state.uploaded_files_content) > 0:
@@ -171,16 +279,29 @@ def main():
                 elif not st.session_state.uploaded_files_content:
                     st.error("请上传至少一个文件")
                 else:
-                    # 完整读取数据并执行合并
-                    with st.spinner("正在读取数据并合并文件..."):
-                        st.session_state.merge_result = merge_excel(
-                            st.session_state.uploaded_files_content, 
-                            selected_columns
-                        )
+                    # 重置结果以避免旧数据干扰
+                    st.session_state.merge_result = None
+                    
+                    # 完整读取数据并执行合并（分块处理）
+                    with st.spinner("正在分块合并文件...这可能需要一些时间..."):
+                        try:
+                            st.session_state.merge_result = merge_excel(
+                                st.session_state.uploaded_files_content, 
+                                selected_columns
+                            )
+                            if st.session_state.merge_result is not None and not st.session_state.merge_result.empty:
+                                st.success(f"已成功合并 {len(st.session_state.uploaded_files_content)} 个文件")
+                            else:
+                                st.error("合并结果为空，请检查文件内容")
+                        except Exception as e:
+                            st.error(f"合并过程中出错: {str(e)}")
+                            st.error("请尝试减少合并文件数量或选择更少的列，或使用更小的文件。")
             
             # 显示结果（如果有）
-            if st.session_state.merge_result is not None:
+            if st.session_state.merge_result is not None and not st.session_state.merge_result.empty:
                 st.success(f"已成功合并 {len(st.session_state.uploaded_files_content)} 个文件")
+                
+                # 显示合并结果预览
                 st.dataframe(st.session_state.merge_result.head(20))
                 
                 # 生成Excel下载链接
@@ -188,6 +309,9 @@ def main():
                     st.session_state.merge_result, 
                     st.session_state.original_filename
                 ), unsafe_allow_html=True)
+    
+    # 手动触发垃圾回收
+    gc.collect()
 
 if __name__ == "__main__":
-    main()    
+    main()
