@@ -1,6 +1,5 @@
 import streamlit as st
 import pandas as pd
-import os
 from datetime import datetime
 import zipfile
 from io import BytesIO
@@ -21,12 +20,7 @@ def split_excel(file, num_splits):
         # 获取原始文件名（不带扩展名）
         original_filename = os.path.splitext(file.name)[0]
         
-        # 创建保存拆分文件的目录
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_dir = f"split_files_{timestamp}"
-        os.makedirs(output_dir, exist_ok=True)
-        
-        # 存储拆分后的文件路径
+        # 创建保存拆分文件的内存缓冲区
         output_files = []
         
         start_idx = 0
@@ -38,10 +32,16 @@ def split_excel(file, num_splits):
             end_idx = start_idx + current_rows
             sub_df = df.iloc[start_idx:end_idx]
             
-            # 保存子文件
-            output_filename = f"{output_dir}/{original_filename}——拆分{i+1}.xlsx"
-            sub_df.to_excel(output_filename, index=False)
-            output_files.append(output_filename)
+            # 创建内存缓冲区
+            buffer = BytesIO()
+            sub_df.to_excel(buffer, index=False)
+            buffer.seek(0)
+            
+            # 保存子文件信息
+            output_files.append({
+                'buffer': buffer,
+                'filename': f"{original_filename}——拆分{i+1}.xlsx"
+            })
             
             # 更新起始索引
             start_idx = end_idx
@@ -59,11 +59,6 @@ def merge_excel(files):
             st.error("请上传至少一个 Excel 文件")
             return None
         
-        # 创建保存合并文件的目录
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_dir = f"merged_files_{timestamp}"
-        os.makedirs(output_dir, exist_ok=True)
-        
         # 读取并合并所有文件
         dfs = []
         for file in files:
@@ -76,14 +71,20 @@ def merge_excel(files):
         # 获取原始文件名（不带扩展名）
         if len(files) == 1:
             original_filename = os.path.splitext(files[0].name)[0]
-            output_filename = f"{output_dir}/{original_filename}——合并.xlsx"
+            output_filename = f"{original_filename}——合并.xlsx"
         else:
-            output_filename = f"{output_dir}/合并文件_{timestamp}.xlsx"
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            output_filename = f"合并文件_{timestamp}.xlsx"
         
-        # 保存合并后的文件
-        merged_df.to_excel(output_filename, index=False)
+        # 创建内存缓冲区
+        buffer = BytesIO()
+        merged_df.to_excel(buffer, index=False)
+        buffer.seek(0)
         
-        return output_filename
+        return {
+            'buffer': buffer,
+            'filename': output_filename
+        }
     
     except Exception as e:
         st.error(f"合并文件时出错: {str(e)}")
@@ -120,8 +121,8 @@ def main():
                         # 创建 ZIP 文件以便批量下载
                         zip_buffer = BytesIO()
                         with zipfile.ZipFile(zip_buffer, 'w') as zipf:
-                            for file_path in output_files:
-                                zipf.write(file_path, os.path.basename(file_path))
+                            for file in output_files:
+                                zipf.writestr(file['filename'], file['buffer'].getvalue())
                         
                         # 定位到 ZIP 文件的开始
                         zip_buffer.seek(0)
@@ -136,23 +137,13 @@ def main():
                         
                         # 单独文件下载选项
                         st.subheader("或单独下载拆分后的文件")
-                        for file_path in output_files:
-                            with open(file_path, "rb") as f:
-                                file_bytes = f.read()
-                                file_name = os.path.basename(file_path)
-                                st.download_button(
-                                    label=f"下载 {file_name}",
-                                    data=file_bytes,
-                                    file_name=file_name,
-                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                                )
-                        
-                        # 清理临时文件
-                        if st.button("清理临时文件"):
-                            for file_path in output_files:
-                                os.remove(file_path)
-                            os.rmdir(os.path.dirname(output_files[0]))
-                            st.info("临时文件已清理完毕。")
+                        for file in output_files:
+                            st.download_button(
+                                label=f"下载 {file['filename']}",
+                                data=file['buffer'],
+                                file_name=file['filename'],
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                            )
     
     else:  # 文件合并
         st.subheader("Excel 文件合并")
@@ -175,21 +166,12 @@ def main():
                         st.success("文件合并成功！")
                         
                         # 显示下载链接
-                        with open(output_file, "rb") as f:
-                            file_bytes = f.read()
-                            file_name = os.path.basename(output_file)
-                            st.download_button(
-                                label=f"下载合并后的文件",
-                                data=file_bytes,
-                                file_name=file_name,
-                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                            )
-                        
-                        # 清理临时文件
-                        if st.button("清理临时文件"):
-                            os.remove(output_file)
-                            os.rmdir(os.path.dirname(output_file))
-                            st.info("临时文件已清理完毕。")
+                        st.download_button(
+                            label=f"下载合并后的文件",
+                            data=output_file['buffer'],
+                            file_name=output_file['filename'],
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                        )
 
 if __name__ == "__main__":
     main()    
