@@ -3,6 +3,7 @@ import pandas as pd
 from datetime import datetime
 import zipfile
 from io import BytesIO
+import os
 
 def split_excel(file, num_splits):
     """将 Excel 文件拆分为指定数量的子文件"""
