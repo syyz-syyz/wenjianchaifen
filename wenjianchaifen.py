@@ -12,15 +12,19 @@ if 'merge_result' not in st.session_state:
     st.session_state.merge_result = None
 if 'original_filename' not in st.session_state:
     st.session_state.original_filename = None
+if 'uploaded_file_content' not in st.session_state:
+    st.session_state.uploaded_file_content = None
+if 'uploaded_files_content' not in st.session_state:
+    st.session_state.uploaded_files_content = None
 
-def read_excel_columns(file):
+def read_excel_columns(file_content):
     """读取Excel文件的列名而不加载数据"""
-    df = pd.read_excel(file, nrows=0)
+    df = pd.read_excel(file_content, nrows=0)
     return df.columns.tolist()
 
-def split_excel(file, num_splits, selected_columns=None):
+def split_excel(file_content, num_splits, selected_columns=None):
     """将Excel文件拆分为多个子文件"""
-    df = pd.read_excel(file)
+    df = pd.read_excel(file_content)
     
     if selected_columns:
         df = df[selected_columns]
@@ -40,11 +44,11 @@ def split_excel(file, num_splits, selected_columns=None):
     
     return split_dfs
 
-def merge_excel(files, selected_columns=None):
+def merge_excel(files_content, selected_columns=None):
     """合并多个Excel文件为一个"""
     dfs = []
     
-    for file in files:
+    for file in files_content:
         df = pd.read_excel(file)
         if selected_columns:
             df = df[selected_columns]
@@ -92,14 +96,16 @@ def main():
     if operation == "拆分文件":
         st.header("Excel文件拆分")
         
-        # 上传文件
+        # 上传文件并保存到session state
         uploaded_file = st.file_uploader("上传Excel文件", type=["xlsx", "xls"])
-        
-        if uploaded_file:
+        if uploaded_file is not None:
+            st.session_state.uploaded_file_content = uploaded_file
             st.session_state.original_filename = uploaded_file.name
-            
+        
+        # 检查是否有上传的文件内容
+        if st.session_state.uploaded_file_content is not None:
             # 只读取列名
-            all_columns = read_excel_columns(uploaded_file)
+            all_columns = read_excel_columns(st.session_state.uploaded_file_content)
             
             # 设置拆分数量
             num_splits = st.number_input("拆分为几个文件", min_value=1, max_value=100, value=2)
@@ -117,7 +123,11 @@ def main():
                 else:
                     # 完整读取数据并执行拆分
                     with st.spinner("正在读取数据并拆分文件..."):
-                        st.session_state.split_result = split_excel(uploaded_file, num_splits, selected_columns)
+                        st.session_state.split_result = split_excel(
+                            st.session_state.uploaded_file_content, 
+                            num_splits, 
+                            selected_columns
+                        )
             
             # 显示结果（如果有）
             if st.session_state.split_result is not None:
@@ -137,15 +147,16 @@ def main():
     else:  # 合并文件
         st.header("Excel文件合并")
         
-        # 上传文件
+        # 上传文件并保存到session state
         uploaded_files = st.file_uploader("上传多个Excel文件", type=["xlsx", "xls"], accept_multiple_files=True)
+        if uploaded_files is not None and len(uploaded_files) > 0:
+            st.session_state.uploaded_files_content = uploaded_files
+            st.session_state.original_filename = uploaded_files[0].name if uploaded_files else "合并文件"
         
-        if uploaded_files:
-            if uploaded_files:
-                all_columns = read_excel_columns(uploaded_files[0])
-                st.session_state.original_filename = uploaded_files[0].name if uploaded_files else "合并文件"
-            else:
-                all_columns = []
+        # 检查是否有上传的文件内容
+        if st.session_state.uploaded_files_content is not None and len(st.session_state.uploaded_files_content) > 0:
+            # 读取第一个文件的列名
+            all_columns = read_excel_columns(st.session_state.uploaded_files_content[0])
             
             # 选择输出列
             selected_columns = st.multiselect(
@@ -157,16 +168,19 @@ def main():
             if st.button("执行合并"):
                 if not selected_columns:
                     st.error("请至少选择一列")
-                elif not uploaded_files:
+                elif not st.session_state.uploaded_files_content:
                     st.error("请上传至少一个文件")
                 else:
                     # 完整读取数据并执行合并
                     with st.spinner("正在读取数据并合并文件..."):
-                        st.session_state.merge_result = merge_excel(uploaded_files, selected_columns)
+                        st.session_state.merge_result = merge_excel(
+                            st.session_state.uploaded_files_content, 
+                            selected_columns
+                        )
             
             # 显示结果（如果有）
             if st.session_state.merge_result is not None:
-                st.success(f"已成功合并 {len(uploaded_files)} 个文件")
+                st.success(f"已成功合并 {len(st.session_state.uploaded_files_content)} 个文件")
                 st.dataframe(st.session_state.merge_result.head(20))
                 
                 # 生成Excel下载链接
