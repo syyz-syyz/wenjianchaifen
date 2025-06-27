@@ -118,8 +118,6 @@ def main():
                     # 完整读取数据并执行拆分
                     with st.spinner("正在读取数据并拆分文件..."):
                         st.session_state.split_result = split_excel(uploaded_file, num_splits, selected_columns)
-                    
-                    # 成功提示将在下面显示，确保不会被重新运行清除
             
             # 显示结果（如果有）
             if st.session_state.split_result is not None:
