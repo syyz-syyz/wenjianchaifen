@@ -6,7 +6,6 @@ from io import BytesIO
 import base64
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
-from openpyxl.writer.excel import save_virtual_workbook
 
 # 初始化session state
 if 'split_result' not in st.session_state:
@@ -67,18 +66,18 @@ def split_excel_openpyxl(file_content, num_splits, selected_columns=None):
         current_row += target_rows
     
     # 生成拆分文件数据
-    split_dfs = []
+    split_files = []
     for start_row, end_row in split_plans:
         # 创建新的写入工作簿
-        wb_split = load_workbook(write_only=True)
+        from openpyxl import Workbook
+        wb_split = Workbook(write_only=True)
         ws_split = wb_split.create_sheet()
         
         # 写入表头
-        header = [cell.value for cell in ws.iter_rows(min_row=1, max_row=1, max_col=total_cols if not selected_cols else len(selected_cols))]
+        header = [cell.value for cell in next(ws.iter_rows(min_row=1, max_row=1))]
         ws_split.append(header)
         
         # 流式写入数据行
-        row_count = 0
         for row in ws.iter_rows(min_row=start_row, max_row=end_row):
             if selected_cols:
                 # 只选择指定列
@@ -86,19 +85,17 @@ def split_excel_openpyxl(file_content, num_splits, selected_columns=None):
             else:
                 values = [cell.value for cell in row]
             ws_split.append(values)
-            row_count += 1
         
-        # 转换为DataFrame（仅用于预览，实际写入由openpyxl处理）
-        if row_count > 0:
-            df = pd.DataFrame(ws_split.values)
-            df.columns = df.iloc[0]
-            df = df[1:]
-            split_dfs.append(df)
+        # 将工作簿保存到内存
+        buffer = BytesIO()
+        wb_split.save(buffer)
+        buffer.seek(0)
+        split_files.append(buffer)
         
         wb_split.close()
     
     wb.close()
-    return split_dfs
+    return split_files
 
 def merge_excel(files_content, selected_columns=None):
     """合并多个Excel文件为一个（一次性加载）"""
@@ -122,28 +119,22 @@ def merge_excel(files_content, selected_columns=None):
     
     return merged_df
 
-def get_zip_download_link(split_dfs, original_filename):
+def get_zip_download_link(split_files, original_filename):
     """生成包含所有拆分文件的ZIP下载链接"""
     zip_buffer = BytesIO()
     base_name, ext = os.path.splitext(original_filename)
     
     with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zipf:
-        for i, df in enumerate(split_dfs):
-            # 创建Excel文件
-            excel_buffer = BytesIO()
-            with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
-                df.to_excel(writer, index=False, sheet_name='Sheet1')
-            excel_buffer.seek(0)
-            
+        for i, buffer in enumerate(split_files):
             # 添加到ZIP文件
-            zipf.writestr(f"{base_name}——拆分{i+1}of{len(split_dfs)}{ext}", excel_buffer.getvalue())
+            zipf.writestr(f"{base_name}——拆分{i+1}of{len(split_files)}{ext}", buffer.getvalue())
     
     zip_buffer.seek(0)
     b64 = base64.b64encode(zip_buffer.read()).decode()
     href = f'<a href="data:application/zip;base64,{b64}" download="{base_name}_拆分文件.zip">下载所有拆分文件 (ZIP)</a>'
     
     # 释放内存
-    del split_dfs
+    del split_files
     
     return href
 
@@ -222,11 +213,6 @@ def main():
             # 显示结果（如果有）
             if st.session_state.split_result is not None:
                 st.success(f"已成功将文件拆分为 {num_splits} 个部分")
-                
-                # 显示前几个拆分文件的预览
-                for i, split_df in enumerate(st.session_state.split_result[:3]):
-                    st.subheader(f"拆分文件 {i+1}/{len(st.session_state.split_result)} 预览")
-                    st.dataframe(split_df.head(10))
                 
                 # 生成ZIP下载链接
                 st.markdown(get_zip_download_link(
