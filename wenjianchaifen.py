@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import os
 from datetime import datetime
+from io import BytesIO
 
 def split_excel(file, num_splits):
     """将 Excel 文件拆分为指定数量的子文件（支持大文件）"""
@@ -38,23 +39,19 @@ def split_excel(file, num_splits):
                 sub_df = df.iloc[start_idx:end_idx]
                 
                 # 创建内存中的 Excel 文件
-                excel_buffer = st.spinner()
-                with excel_buffer:
-                    excel_buffer = st.spinner()
-                    with excel_buffer:
-                        excel_buffer = BytesIO()
-                        if len(sheet_names) == 1:
-                            sub_df.to_excel(excel_buffer, index=False)
-                            file_name = f"{original_filename}——拆分{i+1}.xlsx"
-                        else:
-                            sub_df.to_excel(excel_buffer, sheet_name=sheet_name, index=False)
-                            file_name = f"{original_filename}——拆分{i+1}_{sheet_name}.xlsx"
-                        
-                        # 定位到 Excel 文件的开始
-                        excel_buffer.seek(0)
-                        
-                        # 添加到输出文件列表
-                        output_files.append((excel_buffer, file_name))
+                excel_buffer = BytesIO()
+                if len(sheet_names) == 1:
+                    sub_df.to_excel(excel_buffer, index=False)
+                    file_name = f"{original_filename}——拆分{i+1}.xlsx"
+                else:
+                    sub_df.to_excel(excel_buffer, sheet_name=sheet_name, index=False)
+                    file_name = f"{original_filename}——拆分{i+1}_{sheet_name}.xlsx"
+                
+                # 定位到 Excel 文件的开始
+                excel_buffer.seek(0)
+                
+                # 添加到输出文件列表
+                output_files.append((excel_buffer, file_name))
                 
                 # 更新起始索引
                 start_idx = end_idx
