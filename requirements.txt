@@ -1,7 +1,4 @@
 pandas
 streamlit
 openpyxl
-os
-datatime
 zipfile
-io
