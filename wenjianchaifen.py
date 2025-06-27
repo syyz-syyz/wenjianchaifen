@@ -52,35 +52,41 @@ def merge_excel(files, selected_columns=None):
     merged_df = pd.concat(dfs, ignore_index=True)
     return merged_df
 
-def get_table_download_link(df, original_filename, part_num, total_parts):
-    """生成Excel下载链接"""
-    # 确定新文件名
-    base_name, ext = os.path.splitext(original_filename)
-    new_filename = f"{base_name}——拆分{part_num+1}of{total_parts}{ext}"
-    
-    # 创建Excel文件
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df.to_excel(writer, index=False, sheet_name='Sheet1')
-    output.seek(0)
-    
-    # 生成下载链接
-    b64 = base64.b64encode(output.read()).decode()
-    href = f'<a href="data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,{b64}" download="{new_filename}">下载拆分文件 {part_num+1}/{total_parts}</a>'
-    return href
-
-def get_zip_download_link(files_dict, original_filename):
-    """生成ZIP文件下载链接"""
+def get_zip_download_link(split_dfs, original_filename):
+    """生成包含所有拆分文件的ZIP下载链接"""
     # 创建ZIP文件
     zip_buffer = BytesIO()
+    base_name, ext = os.path.splitext(original_filename)
+    
     with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zipf:
-        for filename, content in files_dict.items():
-            zipf.writestr(filename, content)
+        for i, df in enumerate(split_dfs):
+            # 创建Excel文件
+            excel_buffer = BytesIO()
+            with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
+                df.to_excel(writer, index=False, sheet_name='Sheet1')
+            excel_buffer.seek(0)
+            
+            # 添加到ZIP文件
+            zipf.writestr(f"{base_name}——拆分{i+1}of{len(split_dfs)}{ext}", excel_buffer.getvalue())
     
     # 生成下载链接
     zip_buffer.seek(0)
     b64 = base64.b64encode(zip_buffer.read()).decode()
-    href = f'<a href="data:application/zip;base64,{b64}" download="{original_filename}_合并.zip">下载合并文件</a>'
+    href = f'<a href="data:application/zip;base64,{b64}" download="{base_name}_拆分文件.zip">下载所有拆分文件 (ZIP)</a>'
+    return href
+
+def get_excel_download_link(df, original_filename):
+    """生成Excel下载链接"""
+    # 创建Excel文件
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name='合并数据')
+    output.seek(0)
+    
+    # 生成下载链接
+    b64 = base64.b64encode(output.read()).decode()
+    base_name, _ = os.path.splitext(original_filename if original_filename else "合并文件")
+    href = f'<a href="data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,{b64}" download="{base_name}_合并.xlsx">下载合并后的Excel文件</a>'
     return href
 
 def main():
@@ -120,11 +126,13 @@ def main():
                     # 显示结果并提供下载链接
                     st.success(f"已成功将文件拆分为 {num_splits} 个部分")
                     
-                    # 生成并保存所有拆分文件
-                    for i, split_df in enumerate(split_dfs):
-                        st.subheader(f"拆分文件 {i+1}/{num_splits}")
+                    # 显示前几个拆分文件的预览
+                    for i, split_df in enumerate(split_dfs[:3]):  # 只显示前3个拆分文件的预览
+                        st.subheader(f"拆分文件 {i+1}/{num_splits} 预览")
                         st.dataframe(split_df.head(10))  # 显示前10行
-                        st.markdown(get_table_download_link(split_df, uploaded_file.name, i, num_splits), unsafe_allow_html=True)
+                    
+                    # 生成ZIP下载链接
+                    st.markdown(get_zip_download_link(split_dfs, uploaded_file.name), unsafe_allow_html=True)
     
     else:  # 合并文件
         st.header("Excel文件合并")
@@ -134,8 +142,11 @@ def main():
         
         if uploaded_files:
             # 读取第一个文件以获取列名
-            df = pd.read_excel(uploaded_files[0])
-            all_columns = df.columns.tolist()
+            if uploaded_files:
+                df = pd.read_excel(uploaded_files[0])
+                all_columns = df.columns.tolist()
+            else:
+                all_columns = []
             
             # 选择输出列
             selected_columns = st.multiselect(
@@ -147,6 +158,8 @@ def main():
             if st.button("执行合并"):
                 if not selected_columns:
                     st.error("请至少选择一列")
+                elif not uploaded_files:
+                    st.error("请上传至少一个文件")
                 else:
                     # 执行合并
                     merged_df = merge_excel(uploaded_files, selected_columns)
@@ -155,21 +168,9 @@ def main():
                     st.success(f"已成功合并 {len(uploaded_files)} 个文件")
                     st.dataframe(merged_df.head(20))  # 显示前20行
                     
-                    # 创建单个Excel文件
-                    output = BytesIO()
-                    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                        merged_df.to_excel(writer, index=False, sheet_name='合并数据')
-                    output.seek(0)
-                    
-                    # 生成下载链接
-                    b64 = base64.b64encode(output.read()).decode()
-                    original_filename = "合并文件" if len(uploaded_files) == 0 else os.path.splitext(uploaded_files[0].name)[0]
-                    href = f'<a href="data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,{b64}" download="{original_filename}_合并.xlsx">下载合并后的Excel文件</a>'
-                    st.markdown(href, unsafe_allow_html=True)
-                    
-                    # 可选：如果需要ZIP格式（例如包含多个工作表）
-                    # files_dict = {f"合并数据.xlsx": output.getvalue()}
-                    # st.markdown(get_zip_download_link(files_dict, original_filename), unsafe_allow_html=True)
+                    # 生成Excel下载链接
+                    original_filename = uploaded_files[0].name if uploaded_files else "合并文件"
+                    st.markdown(get_excel_download_link(merged_df, original_filename), unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()    
