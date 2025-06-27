@@ -4,6 +4,9 @@ import os
 import zipfile
 from io import BytesIO
 import base64
+from openpyxl import load_workbook
+from openpyxl.utils import get_column_letter
+from openpyxl.writer.excel import save_virtual_workbook
 
 # 初始化session state
 if 'split_result' not in st.session_state:
@@ -17,43 +20,84 @@ if 'uploaded_file_content' not in st.session_state:
 if 'uploaded_files_content' not in st.session_state:
     st.session_state.uploaded_files_content = None
 
-def read_excel_columns(file_content):
-    """读取Excel文件的列名而不加载数据"""
-    df = pd.read_excel(file_content, nrows=0)
-    return df.columns.tolist()
+def get_excel_columns_openpyxl(file_content):
+    """使用openpyxl读取Excel文件的列名而不加载数据"""
+    # 以只读模式加载工作簿
+    wb = load_workbook(file_content, read_only=True)
+    ws = wb.active
+    
+    # 读取第一行作为列名
+    columns = [cell.value for cell in next(ws.iter_rows(min_row=1, max_row=1))]
+    wb.close()  # 关闭工作簿释放资源
+    
+    return columns
 
-def split_excel(file_content, num_splits, selected_columns=None):
-    """将Excel文件拆分为多个子文件（一次性加载）"""
-    # 读取完整数据
-    df = pd.read_excel(file_content)
+def split_excel_openpyxl(file_content, num_splits, selected_columns=None):
+    """使用openpyxl拆分Excel文件（流式处理，低内存占用）"""
+    wb = load_workbook(file_content, read_only=True)
+    ws = wb.active
     
-    # 筛选列
+    # 获取总行列数
+    total_rows = ws.max_row
+    total_cols = ws.max_column
+    
+    # 转换列名索引（如"A", "B"）
     if selected_columns:
-        df = df[selected_columns]
-    
-    # 计算总行数
-    total_rows = len(df)
+        # 将列名转换为索引（如"姓名"→"B"）
+        col_indices = []
+        header = [cell.value for cell in next(ws.iter_rows(min_row=1, max_row=1))]
+        
+        for col_name in selected_columns:
+            if col_name in header:
+                col_idx = header.index(col_name) + 1  # openpyxl从1开始计数
+                col_indices.append(get_column_letter(col_idx))
+        selected_cols = col_indices if col_indices else None
+    else:
+        selected_cols = None
     
     # 计算每个拆分文件的行数
     rows_per_split = total_rows // num_splits
     remainder = total_rows % num_splits
-    
-    # 准备拆分文件
-    split_dfs = []
-    start_idx = 0
+    split_plans = []
+    current_row = 1  # openpyxl从1开始计数
     
     for i in range(num_splits):
-        # 确定当前拆分的行数
-        current_rows = rows_per_split + (1 if i < remainder else 0)
-        end_idx = start_idx + current_rows
+        target_rows = rows_per_split + (1 if i < remainder else 0)
+        split_plans.append((current_row, current_row + target_rows - 1))
+        current_row += target_rows
+    
+    # 生成拆分文件数据
+    split_dfs = []
+    for start_row, end_row in split_plans:
+        # 创建新的写入工作簿
+        wb_split = load_workbook(write_only=True)
+        ws_split = wb_split.create_sheet()
         
-        # 提取数据并添加到列表
-        split_dfs.append(df.iloc[start_idx:end_idx])
-        start_idx = end_idx
+        # 写入表头
+        header = [cell.value for cell in ws.iter_rows(min_row=1, max_row=1, max_col=total_cols if not selected_cols else len(selected_cols))]
+        ws_split.append(header)
+        
+        # 流式写入数据行
+        row_count = 0
+        for row in ws.iter_rows(min_row=start_row, max_row=end_row):
+            if selected_cols:
+                # 只选择指定列
+                values = [cell.value for cell in row if cell.column_letter in selected_cols]
+            else:
+                values = [cell.value for cell in row]
+            ws_split.append(values)
+            row_count += 1
+        
+        # 转换为DataFrame（仅用于预览，实际写入由openpyxl处理）
+        if row_count > 0:
+            df = pd.DataFrame(ws_split.values)
+            df.columns = df.iloc[0]
+            df = df[1:]
+            split_dfs.append(df)
+        
+        wb_split.close()
     
-    # 释放原始数据框内存
-    del df
-    
+    wb.close()
     return split_dfs
 
 def merge_excel(files_content, selected_columns=None):
@@ -120,13 +164,13 @@ def get_excel_download_link(df, original_filename):
     return href
 
 def main():
-    st.title("Excel文件拆分与合并工具（一次性加载版）")
+    st.title("Excel文件拆分与合并工具（openpyxl优化版）")
     
     # 选择操作类型
     operation = st.radio("选择操作类型", ["拆分文件", "合并文件"])
     
     if operation == "拆分文件":
-        st.header("Excel文件拆分")
+        st.header("Excel文件拆分（openpyxl优化）")
         
         # 上传文件并保存到session state
         uploaded_file = st.file_uploader("上传Excel文件", type=["xlsx", "xls"])
@@ -138,10 +182,10 @@ def main():
         if st.session_state.uploaded_file_content is not None:
             # 读取列名
             with st.spinner("读取列名..."):
-                all_columns = read_excel_columns(st.session_state.uploaded_file_content)
+                all_columns = get_excel_columns_openpyxl(st.session_state.uploaded_file_content)
             
             # 设置拆分数量
-            num_splits = st.number_input("拆分为几个文件", min_value=1, max_value=50, value=2)
+            num_splits = st.number_input("拆分为几个文件", min_value=1, max_value=100, value=2)
             
             # 选择输出列
             selected_columns = st.multiselect(
@@ -153,7 +197,7 @@ def main():
             # 显示文件大小警告
             file_size = len(st.session_state.uploaded_file_content.getvalue()) / (1024 * 1024)  # MB
             if file_size > 100:
-                st.warning(f"注意：文件大小为 {file_size:.2f} MB，可能需要较长时间处理且占用较多内存。")
+                st.warning(f"注意：文件大小为 {file_size:.2f} MB，openpyxl流式处理已优化内存占用。")
             
             if st.button("执行拆分"):
                 if not selected_columns:
@@ -163,9 +207,9 @@ def main():
                     st.session_state.split_result = None
                     
                     # 读取数据并执行拆分
-                    with st.spinner("正在读取数据并拆分文件..."):
+                    with st.spinner("正在使用openpyxl拆分文件..."):
                         try:
-                            st.session_state.split_result = split_excel(
+                            st.session_state.split_result = split_excel_openpyxl(
                                 st.session_state.uploaded_file_content, 
                                 num_splits, 
                                 selected_columns
@@ -173,7 +217,7 @@ def main():
                             st.success(f"已成功将文件拆分为 {num_splits} 个部分")
                         except Exception as e:
                             st.error(f"处理过程中出错: {str(e)}")
-                            st.error("可能是文件过大，请尝试使用较小的文件或选择更少的列。")
+                            st.error("请尝试减少拆分数量或选择更少的列，或使用更小的文件。")
             
             # 显示结果（如果有）
             if st.session_state.split_result is not None:
@@ -203,7 +247,7 @@ def main():
         if st.session_state.uploaded_files_content is not None and len(st.session_state.uploaded_files_content) > 0:
             # 读取第一个文件的列名
             with st.spinner("读取列名..."):
-                all_columns = read_excel_columns(st.session_state.uploaded_files_content[0])
+                all_columns = get_excel_columns_openpyxl(st.session_state.uploaded_files_content[0])
             
             # 选择输出列
             selected_columns = st.multiselect(
