@@ -2,8 +2,6 @@ import streamlit as st
 import pandas as pd
 import os
 from datetime import datetime
-import zipfile
-from io import BytesIO
 
 def split_excel(file, num_splits):
     """将 Excel 文件拆分为指定数量的子文件（支持大文件）"""
@@ -17,52 +15,55 @@ def split_excel(file, num_splits):
         # 获取原始文件名（不带扩展名）
         original_filename = os.path.splitext(file.name)[0]
         
-        # 创建内存中的 ZIP 文件
-        zip_buffer = BytesIO()
-        with zipfile.ZipFile(zip_buffer, 'w') as zipf:
-            # 处理每个表
-            for sheet_name in sheet_names:
-                # 获取当前表的数据
-                df = xls.parse(sheet_name)
-                
-                # 计算每个子文件的行数
-                total_rows = len(df)
-                rows_per_file = total_rows // num_splits
-                remainder = total_rows % num_splits
-                
-                start_idx = 0
-                for i in range(num_splits):
-                    # 确定当前文件的行数
-                    current_rows = rows_per_file + (1 if i < remainder else 0)
-                    
-                    # 提取数据
-                    end_idx = start_idx + current_rows
-                    sub_df = df.iloc[start_idx:end_idx]
-                    
-                    # 创建内存中的 Excel 文件
-                    excel_buffer = BytesIO()
-                    if sheet_names == 1:
-                        sub_df.to_excel(excel_buffer, index=False)
-                        file_name = f"{original_filename}——拆分{i+1}.xlsx"
-                    else:
-                        sub_df.to_excel(excel_buffer, sheet_name=sheet_name, index=False)
-                        file_name = f"{original_filename}——拆分{i+1}_{sheet_name}.xlsx"
-                    
-                    # 将 Excel 文件添加到 ZIP
-                    excel_buffer.seek(0)
-                    zipf.writestr(file_name, excel_buffer.read())
-                    
-                    # 更新起始索引
-                    start_idx = end_idx
+        # 用于存储每个拆分文件的缓冲区和文件名
+        output_files = []
         
-        # 定位到 ZIP 文件的开始
-        zip_buffer.seek(0)
+        # 处理每个表
+        for sheet_name in sheet_names:
+            # 获取当前表的数据
+            df = xls.parse(sheet_name)
+            
+            # 计算每个子文件的行数
+            total_rows = len(df)
+            rows_per_file = total_rows // num_splits
+            remainder = total_rows % num_splits
+            
+            start_idx = 0
+            for i in range(num_splits):
+                # 确定当前文件的行数
+                current_rows = rows_per_file + (1 if i < remainder else 0)
+                
+                # 提取数据
+                end_idx = start_idx + current_rows
+                sub_df = df.iloc[start_idx:end_idx]
+                
+                # 创建内存中的 Excel 文件
+                excel_buffer = st.spinner()
+                with excel_buffer:
+                    excel_buffer = st.spinner()
+                    with excel_buffer:
+                        excel_buffer = BytesIO()
+                        if len(sheet_names) == 1:
+                            sub_df.to_excel(excel_buffer, index=False)
+                            file_name = f"{original_filename}——拆分{i+1}.xlsx"
+                        else:
+                            sub_df.to_excel(excel_buffer, sheet_name=sheet_name, index=False)
+                            file_name = f"{original_filename}——拆分{i+1}_{sheet_name}.xlsx"
+                        
+                        # 定位到 Excel 文件的开始
+                        excel_buffer.seek(0)
+                        
+                        # 添加到输出文件列表
+                        output_files.append((excel_buffer, file_name))
+                
+                # 更新起始索引
+                start_idx = end_idx
         
-        return zip_buffer
+        return output_files
     
     except Exception as e:
         st.error(f"处理文件时出错: {str(e)}")
-        return None
+        return []
 
 def merge_excel(files):
     """合并多个 Excel 文件为一个（支持大文件）"""
@@ -132,18 +133,19 @@ def main():
             # 拆分按钮
             if st.button("开始拆分"):
                 with st.spinner("正在处理文件..."):
-                    output_zip = split_excel(uploaded_file, num_splits)
+                    output_files = split_excel(uploaded_file, num_splits)
                     
-                    if output_zip:
+                    if output_files:
                         st.success(f"成功将文件拆分为 {num_splits} 个子文件！")
                         
                         # 显示下载链接
-                        st.download_button(
-                            label="下载所有拆分文件 (ZIP)",
-                            data=output_zip,
-                            file_name="拆分文件合集.zip",
-                            mime="application/zip"
-                        )
+                        for buffer, file_name in output_files:
+                            st.download_button(
+                                label=f"下载 {file_name}",
+                                data=buffer,
+                                file_name=file_name,
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                            )
     
     else:  # 文件合并
         st.subheader("Excel 文件合并")
